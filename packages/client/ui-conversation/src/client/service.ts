@@ -21,6 +21,22 @@ import type { DraftAttachmentId, SessionInputResolver } from './input/contract.t
 import type { InputSubmitMode } from './contract/composer-submission.ts'
 
 /**
+ * Mint one RFC 4122 version 4 UUID from `crypto.getRandomValues()`.
+ * `crypto.randomUUID` exists only in secure contexts (HTTPS or loopback), and
+ * this browser bundle also serves plain-HTTP LAN deployments (the all-interfaces
+ * bind), so draft ids must not depend on it.
+ * @returns a UUID string in canonical 8-4-4-4-12 form.
+ */
+function randomUuid(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  view.setUint8(6, (view.getUint8(6) & 0x0f) | 0x40)
+  view.setUint8(8, (view.getUint8(8) & 0x3f) | 0x80)
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
  * The outward conversation face (`ctx.conversation`): the scope-addressed
  * verbs and the input registry other plugins may reach — and exactly what a
  * test fake must supply.
@@ -62,7 +78,7 @@ export interface IConversation {
 function browserDraftAttachment(file: File): ComposerAttachment {
   return {
     kind: 'image',
-    id: crypto.randomUUID() as DraftAttachmentId,
+    id: randomUuid() as DraftAttachmentId,
     previewUrl: URL.createObjectURL(file),
     file,
   }
