@@ -18,6 +18,16 @@ export const hostDescribeValueSchema = z.object({
   model: z.string().optional(),
   attachedSessions: z.number().int().nonnegative(),
   canOpenPath: z.boolean(),
+  /**
+   * Server-side verdict: whether THIS request crossed the trust fence with the
+   * privileged methods widened to the deployment's trusted hosts (true for
+   * loopback always; true for a trusted authority only when
+   * `allowPrivilegedFromTrustedHosts` is on). Annotated by the connection
+   * layer on the real wire; absent when a peer never annotates it (e.g. the
+   * in-process handler), in which case clients fall back to their own
+   * loopback knowledge.
+   */
+  privilegedReachable: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<ResponseValue<'host.describe'>>>
 
 /** host.pickDirectory request payload (empty object literal). */

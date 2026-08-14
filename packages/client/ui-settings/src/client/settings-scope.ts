@@ -49,12 +49,14 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
   /**
    * @param api - settings wire face.
    * @param spec - namespace identity and optional narrowing decoder.
-   * @param persistence - remote browsers remain process-local because settings RPCs are loopback-only.
+   * @param persistence - remote browsers remain process-local because settings
+   * RPCs are loopback-only until the connection handshake proves the
+   * privileged plane is reachable from this client.
    */
   constructor(
     private readonly api: SettingsFace,
     private readonly spec: SettingsScopeSpec<T>,
-    private readonly persistence: 'host' | 'memory' = 'host',
+    private persistence: 'host' | 'memory' = 'host',
   ) {
     this.store = createSnapshotStore<SettingsScopeSnapshot<T>>({
       status: persistence === 'host' ? 'loading' : 'unavailable',
@@ -65,6 +67,23 @@ export class SettingsScopeController<T> implements SettingsScope<T> {
       writable: false,
       mode: persistence,
     })
+  }
+
+  /**
+   * Promote this controller from process-memory to Host persistence once the
+   * connection handshake proves the privileged configuration plane is
+   * reachable from this client (trusted-LAN deployments). No-op when already
+   * host-backed or disposed; safe to call from a connection-description
+   * subscriber, which resolves the pre-handshake fallback.
+   */
+  upgradeToHost(): void {
+    if (this.persistence === 'host' || this.disposed) return
+    this.persistence = 'host'
+    this.store.update((draft) => {
+      draft.status = 'loading'
+      draft.mode = 'host'
+    })
+    void this.load()
   }
 
   /** @returns the current sync snapshot (stable reference until the next change). */
@@ -245,10 +264,12 @@ export class SettingsScopeBinder extends Service {
   bind<T>(spec: SettingsScopeSpec<T>): SettingsScope<T> {
     const ctx = this.ctx
     const connection = ctx.get('connection') as ConnectionHandle
+    const privilegedReachable = (): boolean =>
+      connection.hostDescription.getSnapshot()?.privilegedReachable ?? connection.isLoopback
     const controller = new SettingsScopeController<T>(
       connection.api,
       spec,
-      connection.isLoopback ? 'host' : 'memory',
+      privilegedReachable() ? 'host' : 'memory',
     )
     ctx.effect(() => {
       const refresh = (namespace?: string): void => {
@@ -258,6 +279,15 @@ export class SettingsScopeBinder extends Service {
       const disposers = [
         (ctx.get('remote') as Context['remote']).$on('settings/document-updated', refresh),
         ctx.on('connection/reset', () => { refresh() }),
+        // The handshake runs after streams open — after UI plugins have
+        // already applied — so the initial construction above used the
+        // pre-handshake fallback. The first host.describe that reaches this
+        // client carries the server's privileged verdict for this connection:
+        // promote the scope to Host persistence when it opens the
+        // configuration plane.
+        connection.hostDescription.subscribe(() => {
+          if (privilegedReachable()) controller.upgradeToHost()
+        }),
       ]
       void controller.load()
       return async () => {

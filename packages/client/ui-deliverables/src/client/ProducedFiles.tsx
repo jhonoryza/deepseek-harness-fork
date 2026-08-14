@@ -48,7 +48,7 @@ export function fitProducedFiles(
 
 /** Registration-side Host capability facts. */
 export interface ProducedFilesInjected {
-  /** Whether the browser itself is connected over loopback. */
+  /** Whether the browser itself is connected over loopback (pre-handshake fallback for the privileged verdict). */
   isLoopback: boolean
   hooks: {
     /** Current generation's Host description, bound by the slot renderer. */
@@ -74,7 +74,12 @@ export function ProducedFiles({
   matched: paths, openFile, isLoopback, useHostDescription, t,
 }: ProducedFilesProps) {
   const hostCanOpenPath = useHostDescription(description => description?.canOpenPath === true)
-  const canOpenPath = isLoopback && hostCanOpenPath
+  // The host.describe handshake carries the server's verdict for THIS client:
+  // a trusted-LAN browser (privilegedReachable true) may open paths even
+  // though it is not loopback. Pre-handshake the snapshot is undefined and we
+  // fall back to the page authority, which keeps the loopback behavior.
+  const privileged = useHostDescription(description => description?.privilegedReachable) ?? isLoopback
+  const canOpenPath = privileged && hostCanOpenPath
   const limit = Math.min(paths.length, SHOWN_LIMIT)
   const [shownCount, setShownCount] = useState(limit)
   const rowRef = useRef<HTMLDivElement>(null)

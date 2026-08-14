@@ -62,6 +62,54 @@ function trackValues(scope: SettingsScope<UiTestSettings>): Array<UiTestSettings
   return seen
 }
 
+/** Observable host-description double: starts empty, `set` flips the snapshot and notifies. */
+function hostDescriptionSource(): {
+  source: { getSnapshot: () => { privilegedReachable?: boolean } | undefined; subscribe: (listener: () => void) => () => void }
+  set: (next?: { privilegedReachable?: boolean }) => void
+} {
+  const listeners = new Set<() => void>()
+  let current: { privilegedReachable?: boolean } | undefined
+  return {
+    source: {
+      getSnapshot: () => current,
+      subscribe: (listener) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+    },
+    set(next) {
+      current = next
+      for (const listener of [...listeners]) listener()
+    },
+  }
+}
+
+/** Connection double with an empty host description (pre-handshake state). */
+function connectionWith(
+  overrides: { isLoopback?: boolean; description?: { privilegedReachable?: boolean } | undefined } = {},
+): {
+  connection: {
+    api: Record<string, never>
+    isLoopback: boolean
+    hostDescription: {
+      getSnapshot: () => { privilegedReachable?: boolean } | undefined
+      subscribe: (listener: () => void) => () => void
+    }
+  }
+  description: ReturnType<typeof hostDescriptionSource>
+} {
+  const description = hostDescriptionSource()
+  description.set(overrides.description)
+  return {
+    connection: {
+      api: {},
+      isLoopback: overrides.isLoopback ?? true,
+      hostDescription: description.source,
+    },
+    description,
+  }
+}
+
 describe('SettingsScopeController', () => {
   it('starts loading and publishes a schema-valid section with revision and writability', async () => {
     const describeCall = vi.fn().mockResolvedValueOnce(described({ preference: 'dark' }, 3))
@@ -373,9 +421,10 @@ describe('SettingsScopeBinder.bind', () => {
       .mockResolvedValueOnce(described({ preference: 'light' }, 2))
       .mockResolvedValueOnce(described({ preference: 'system' }, 3))
     const ctx = new Context()
+    const { connection } = connectionWith({ isLoopback: true })
     ctx.provide('connection', {
+      ...connection,
       api: { settings: { describe: describeCall } },
-      isLoopback: true,
     } as never)
     let scope!: SettingsScope<UiTestSettings>
     new TestRemote(ctx)
@@ -405,9 +454,10 @@ describe('SettingsScopeBinder.bind', () => {
   it('binds a remote browser in memory mode without starting a settings read', async () => {
     const describeCall = vi.fn()
     const ctx = new Context()
+    const { connection } = connectionWith({ isLoopback: false })
     ctx.provide('connection', {
+      ...connection,
       api: { settings: { describe: describeCall } },
-      isLoopback: false,
     } as never)
     let scope!: SettingsScope<UiTestSettings>
     new TestRemote(ctx)
@@ -422,5 +472,42 @@ describe('SettingsScopeBinder.bind', () => {
     expect(scope.getSnapshot()).toMatchObject({ status: 'unavailable', mode: 'memory', writable: false })
     await fiber.dispose()
     expect(describeCall).not.toHaveBeenCalled()
+  })
+
+  it('upgrades a remote browser scope to Host persistence once the handshake proves privilege', async () => {
+    const describeCall = vi.fn()
+      .mockResolvedValueOnce(described({ preference: 'dark' }, 1))
+    const ctx = new Context()
+    const { connection, description } = connectionWith({ isLoopback: false })
+    ctx.provide('connection', {
+      ...connection,
+      api: { settings: { describe: describeCall } },
+    } as never)
+    let scope!: SettingsScope<UiTestSettings>
+    new TestRemote(ctx)
+    await ctx.plugin(SettingsScopeBinder).await()
+    const fiber = ctx.plugin({
+      inject: ['connection', 'remote', 'settingsScope'],
+      apply: (plugin: Context) => {
+        scope = plugin.settingsScope.bind<UiTestSettings>({ namespace: 'ui-test' })
+      },
+    })
+    await fiber.await()
+    expect(scope.getSnapshot()).toMatchObject({ status: 'unavailable', mode: 'memory', writable: false })
+    // The real connection publishes the handshake description after streams
+    // open; the subscriber must promote the scope and start a Host read.
+    description.set({ privilegedReachable: true })
+    await vi.waitFor(() => {
+      expect(scope.getSnapshot()).toMatchObject({ status: 'ready', value: { preference: 'dark' }, mode: 'host' })
+    })
+    expect(describeCall).toHaveBeenCalledOnce()
+    // A second publication of the same verdict hits the no-op arm, and a
+    // downgrade never demotes a host-backed scope back to memory.
+    description.set({ privilegedReachable: true })
+    description.set({ privilegedReachable: false })
+    await Promise.resolve()
+    expect(describeCall).toHaveBeenCalledOnce()
+    expect(scope.getSnapshot()).toMatchObject({ status: 'ready', mode: 'host' })
+    await fiber.dispose()
   })
 })

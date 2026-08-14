@@ -803,3 +803,25 @@ describe('resolveBase', () => {
     }
   })
 })
+
+describe('mintRpcId on an insecure origin', () => {
+  it('mints rpcIds from getRandomValues when crypto.randomUUID is unavailable', async () => {
+    // Plain-HTTP LAN (the all-interfaces bind) is not a secure context: browsers
+    // expose crypto.getRandomValues but not crypto.randomUUID there. The carrier
+    // must mint correlation ids from getRandomValues so every /api call works.
+    const originalCrypto = globalThis.crypto
+    const originalGetRandomValues = originalCrypto.getRandomValues.bind(originalCrypto)
+    try {
+      // getRandomValues is branded to the real Crypto object; keep its original
+      // this-binding, and drop only randomUUID to model the insecure origin.
+      vi.stubGlobal('crypto', {
+        getRandomValues: (bytes: Uint8Array<ArrayBuffer>) => originalGetRandomValues(bytes),
+      })
+      expect((globalThis.crypto as { randomUUID?: unknown }).randomUUID).toBeUndefined()
+      const response = await client().sessions.list({})
+      expect(response.rpcId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

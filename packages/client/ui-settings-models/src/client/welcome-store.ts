@@ -35,12 +35,31 @@ export class WelcomeNoticeStore {
 
   /**
    * @param api - settings wire face used for durable reads and writes.
-   * @param persistence - remote browsers use memory because settings is loopback-only.
+   * @param persistence - remote browsers use memory because settings is
+   * loopback-only until the connection handshake proves the privileged plane
+   * is reachable from this client.
    */
   constructor(
     private readonly api: Pick<IApiClient, 'settings'>,
-    private readonly persistence: 'host' | 'memory' = 'host',
+    private persistence: 'host' | 'memory' = 'host',
   ) {}
+
+  /**
+   * Promote this store from process-memory to Host persistence once the
+   * connection handshake proves the privileged configuration plane is
+   * reachable from this client (trusted-LAN deployments). No-op when already
+   * host-backed; safe to call from a connection-description subscriber, which
+   * resolves the pre-handshake fallback.
+   */
+  upgradeToHost(): void {
+    if (this.persistence === 'host') return
+    this.persistence = 'host'
+    this.store.update((state) => {
+      state.status = 'loading'
+      state.error = null
+    })
+    void this.load()
+  }
 
   /** Load the acknowledgement from Host settings or initialize process-local state. */
   async load(): Promise<void> {

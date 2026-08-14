@@ -74,7 +74,10 @@ function fakeResponse(): { response: ServerResponse; state: { status?: number; b
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+async function mounted(
+  config?: { trustedHosts?: string[]; allowPrivilegedFromTrustedHosts?: boolean },
+  apiProxy: ApiProxy = {} as unknown as ApiProxy,
+): Promise<{
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   dispose: () => Promise<void>
@@ -83,10 +86,30 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
   const routes: WebRoute[] = []
   const upgrades: WebUpgradeRoute[] = []
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-  ctx.provide('apiProxy', {} as unknown as ApiProxy)
+  ctx.provide('apiProxy', apiProxy)
   const fiber = ctx.plugin({ inject: [...inject], apply }, config)
   await fiber.await()
   return { routes, upgrades, dispose: () => fiber.dispose() }
+}
+
+/** Minimal host domain answering describe, enough to observe the annotation. */
+function describeProxy(): ApiProxy {
+  return {
+    host: {
+      describe: async (request: { rpcId: string }) => ({
+        rpcId: request.rpcId,
+        result: {
+          ok: true,
+          value: { version: '0-test', cwd: '/t', attachedSessions: 0, canOpenPath: true },
+        },
+      }),
+    },
+  } as unknown as ApiProxy
+}
+
+/** One complete client-request envelope for the given unary method. */
+function envelope(method: string): ClientRequest {
+  return { type: 'client-request', rpcId: RpcId('wire-annotate'), method, payload: {} }
 }
 
 describe('connection node half', () => {
@@ -189,6 +212,40 @@ describe('connection node half', () => {
     const read = fakeResponse()
     await routes[0]!.handler(fakeRequest({ host: 'harness.example' }), read.response)
     expect(read.state.status).not.toBe(403)
+    await dispose()
+  })
+
+  it('admits privileged methods from a trusted authority when allowPrivilegedFromTrustedHosts is set', async () => {
+    const { routes, dispose } = await mounted({
+      trustedHosts: ['harness.example'],
+      allowPrivilegedFromTrustedHosts: true,
+    })
+    // The flag widens the configuration plane to the declared authority: the
+    // carrier 404 (empty proxy) proves the fence passed for each privileged
+    // method from harness.example.
+    for (const method of [
+      'host.pickDirectory', 'host.openPath',
+      'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
+      'credentials.describe', 'credentials.set', 'credentials.unset',
+      'llm.discoverModels',
+      'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
+    ]) {
+      const admitted = fakeResponse()
+      await routes[0]!.handler(
+        fakeRequest({ host: 'harness.example' }, `${API_PATH}/${method}`),
+        admitted.response,
+      )
+      expect([method, admitted.state.status]).toEqual([method, 404])
+    }
+    // An authority outside the trusted set is still refused: the flag widens to
+    // the declared authorities, never to the whole network.
+    const stranger = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({ host: 'evil.example' }, `${API_PATH}/settings.describe`),
+      stranger.response,
+    )
+    expect(stranger.state.status).toBe(403)
+    expect(stranger.state.body).toBe('forbidden')
     await dispose()
   })
 
@@ -453,6 +510,75 @@ describe('connection node half over a real HTTP server', () => {
     })
   }
 
+  /** POST one envelope and return the parsed server-response body (HTTP 200 only). */
+  function callEnvelope(port: number, method: string, host: string): Promise<{
+    type: string
+    rpcId: string
+    result: { ok: boolean; value?: { privilegedReachable?: boolean } }
+  }> {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify(envelope(method))
+      const request = httpRequest(
+        {
+          host: '127.0.0.1', port, path: `${API_PATH}/${method}`, method: 'POST',
+          headers: { host, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => { chunks.push(chunk) })
+          response.on('end', () => {
+            if (response.statusCode !== 200) reject(new Error(`unexpected status ${response.statusCode ?? 0}`))
+            else resolve(JSON.parse(Buffer.concat(chunks).toString()) as never)
+          })
+        },
+      )
+      request.on('error', reject)
+      request.end(body)
+    })
+  }
+
+  it('annotates host.describe with the loopback privileged verdict over real HTTP', async () => {
+    const { routes, dispose } = await mounted(undefined, describeProxy())
+    const { port, close } = await serve(routes)
+    try {
+      const body = await callEnvelope(port, 'host.describe', `127.0.0.1:${String(port)}`)
+      expect(body.result.ok).toBe(true)
+      expect(body.result.value?.privilegedReachable).toBe(true)
+    } finally {
+      await close()
+      await dispose()
+    }
+  })
+
+  it('annotates host.describe as not privileged for a trusted authority while the flag is off', async () => {
+    const { routes, dispose } = await mounted({ trustedHosts: ['harness.example'] }, describeProxy())
+    const { port, close } = await serve(routes)
+    try {
+      const body = await callEnvelope(port, 'host.describe', 'harness.example')
+      expect(body.result.ok).toBe(true)
+      expect(body.result.value?.privilegedReachable).toBe(false)
+    } finally {
+      await close()
+      await dispose()
+    }
+  })
+
+  it('annotates host.describe as privileged for a trusted authority when the flag is set', async () => {
+    const { routes, dispose } = await mounted({
+      trustedHosts: ['harness.example'],
+      allowPrivilegedFromTrustedHosts: true,
+    }, describeProxy())
+    const { port, close } = await serve(routes)
+    try {
+      const body = await callEnvelope(port, 'host.describe', 'harness.example')
+      expect(body.result.ok).toBe(true)
+      expect(body.result.value?.privilegedReachable).toBe(true)
+    } finally {
+      await close()
+      await dispose()
+    }
+  })
+
   it('answers a declared LAN authority with 403 on every configuration method, over real HTTP', async () => {
     // The fence's input is a real IncomingMessage parsed by Node from the
     // wire, not a hand-assembled object: the Host header a LAN browser sends
@@ -487,6 +613,30 @@ describe('connection node half over a real HTTP server', () => {
       }
       // Loopback reaches everything, configuration included.
       expect(await call(port, 'settings.describe', `127.0.0.1:${String(port)}`)).toBe(404)
+    } finally {
+      await close()
+      await dispose()
+    }
+  })
+
+  it('serves configuration methods to a trusted LAN authority over real HTTP when the flag is set', async () => {
+    const { routes, dispose } = await mounted({
+      trustedHosts: ['harness.example'],
+      allowPrivilegedFromTrustedHosts: true,
+    })
+    const { port, close } = await serve(routes)
+    try {
+      for (const method of [
+        'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
+        'credentials.describe', 'credentials.set', 'credentials.unset',
+        'host.pickDirectory', 'host.openPath',
+        'llm.discoverModels',
+        'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
+      ]) {
+        // 404 is the empty proxy's carrier answer: the privileged fence passed
+        // for the declared authority (previously 403).
+        expect([method, await call(port, method, 'harness.example')]).toEqual([method, 404])
+      }
     } finally {
       await close()
       await dispose()

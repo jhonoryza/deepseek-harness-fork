@@ -115,6 +115,30 @@ describe('ConversationController', () => {
     await b.runtime.dispose()
   })
 
+  it('mints draft attachment ids from getRandomValues when crypto.randomUUID is unavailable', async () => {
+    // Plain-HTTP LAN (the all-interfaces bind) is not a secure context: browsers
+    // expose crypto.getRandomValues but not crypto.randomUUID there. Draft image
+    // ids must not depend on the secure-context-only API.
+    const b = await bench()
+    const originalCrypto = globalThis.crypto
+    const originalGetRandomValues = originalCrypto.getRandomValues.bind(originalCrypto)
+    const created = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:draft-lan')
+    try {
+      vi.stubGlobal('crypto', {
+        getRandomValues: (bytes: Uint8Array<ArrayBuffer>) => originalGetRandomValues(bytes),
+      })
+      expect((globalThis.crypto as { randomUUID?: unknown }).randomUUID).toBeUndefined()
+      const [attachment] = b.root.createDraftImages([
+        new File([new Uint8Array(4)], 'a.png', { type: 'image/png' }),
+      ])
+      expect(attachment?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    } finally {
+      created.mockRestore()
+      vi.unstubAllGlobals()
+    }
+    await b.runtime.dispose()
+  })
+
   it('invalidates pending historical image loads when the rendered session is released', async () => {
     const read = Promise.withResolvers<Awaited<ReturnType<SessionFace['readAttachment']>>>()
     const b = await bench(() => read.promise)

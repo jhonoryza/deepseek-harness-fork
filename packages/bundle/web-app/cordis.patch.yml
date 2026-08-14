@@ -161,6 +161,11 @@
         # A deployment adding authorities keeps this expression and concatenates
         # its literals, for example: ['app.internal', ...ctx.webRuntime.trustedHosts].
         trustedHosts: !!js ctx.webRuntime.trustedHosts
+        # Home/LAN fork: admit the configuration plane (settings, credentials,
+        # agent presets, native dialogs) from the trusted authorities above.
+        # The DNS-rebinding Host fence still binds every request; this widens
+        # the loopback-only pin to the declared trusted authorities.
+        allowPrivilegedFromTrustedHosts: true
 
     - id: api-remotes
       name: '@deepseek-ai/dsh-api-remotes'

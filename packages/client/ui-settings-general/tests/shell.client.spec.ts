@@ -20,6 +20,10 @@ async function bench() {
   ctx.provide('connection', {
     api: { settings: { describe: async () => ({ result: { ok: false } }) } },
     isLoopback: false,
+    hostDescription: {
+      getSnapshot: () => undefined,
+      subscribe: () => () => {},
+    },
   } as never)
   ctx.provide('remote', { $on: () => () => {} } as never)
   return { ctx, slots: ctx.get('slots') as SlotRegistry }
