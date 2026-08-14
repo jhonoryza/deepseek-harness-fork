@@ -405,6 +405,17 @@ export interface ConnectionConfig {
    * that is not a bare, canonical authority fails the plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Whether {@link PRIVILEGED_METHODS} (the settings/credential/preset
+   * configuration plane plus native dialogs) may also be reached from the
+   * declared `trustedHosts` authorities. Defaults to false: those methods stay
+   * loopback-only, because `trustedHosts` is a DNS-rebinding fence, not
+   * authentication, and the configuration plane holds the user's secrets.
+   * Set true only on a trusted network where the operator accepts that any
+   * client able to reach the server under a trusted authority may read and
+   * change settings and credentials.
+   */
+  allowPrivilegedFromTrustedHosts?: boolean
   /** Maximum buffered JSON body for every `/api` request. */
   maxRequestBodyBytes?: number
 }

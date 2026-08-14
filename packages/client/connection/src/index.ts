@@ -57,12 +57,24 @@ export interface ConnectionConfig {
    * that is not a bare, canonical authority fails the plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Whether {@link PRIVILEGED_METHODS} (the settings/credential/preset
+   * configuration plane plus native dialogs) may also be reached from the
+   * declared `trustedHosts` authorities. Defaults to false: those methods stay
+   * loopback-only, because `trustedHosts` is a DNS-rebinding fence, not
+   * authentication, and the configuration plane holds the user's secrets.
+   * Set true only on a trusted network where the operator accepts that any
+   * client able to reach the server under a trusted authority may read and
+   * change settings and credentials.
+   */
+  allowPrivilegedFromTrustedHosts?: boolean
   /** Maximum buffered JSON body for every `/api` request. */
   maxRequestBodyBytes?: number
 }
 
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
+  allowPrivilegedFromTrustedHosts: z.boolean().default(false),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
 
@@ -81,6 +93,13 @@ export const Config: z<ConnectionConfig> = z.object({
  * caller chose and reports back the status or the parsed body — an anonymous
  * LAN caller would have a probe for whatever the host can reach and the
  * browser cannot.
+ *
+ * `allowPrivilegedFromTrustedHosts` deliberately widens this set to the
+ * deployment's trusted authorities: on a trusted home/LAN network the
+ * operator may want the settings UI reachable from other machines. The fence
+ * still binds Host (DNS rebinding defense), so only requests whose Host is a
+ * trusted authority pass; the operator accepts that any client on that
+ * network may then read and change the configuration plane.
  *
  * The model catalog (`llm.providers`, `llm.models`) is deliberately NOT here:
  * it carries provider ids, display names, and model lists — no endpoints,
@@ -130,6 +149,7 @@ const PRIVILEGED_METHODS = new Set([
 export function apply(ctx: Context, config?: ConnectionConfig): void {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
+  const allowPrivilegedFromTrustedHosts = config?.allowPrivilegedFromTrustedHosts ?? false
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
@@ -144,7 +164,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         : undefined
       if (method !== undefined
         && PRIVILEGED_METHODS.has(method)
-        && !isTrustedApiRequest(request, [])) {
+        && !isTrustedApiRequest(request, allowPrivilegedFromTrustedHosts ? trustedHosts : [])) {
         return new Response('forbidden', { status: 403 })
       }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
