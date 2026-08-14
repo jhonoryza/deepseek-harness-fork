@@ -41,7 +41,12 @@ export interface HostApi {
    * applied when a new agent doesn't specify them explicitly, absent when the host configures
    * no explicit default (the adapter falls back internally);
    * attachedSessions = count of currently attached sessions (those with a live agent);
-   * canOpenPath = whether this deployment can hand a path to a user-visible native desktop.
+   * canOpenPath = whether this deployment can hand a path to a user-visible native desktop;
+   * privilegedReachable = server-side verdict for THIS request: whether the privileged
+   * configuration plane is reachable from the caller (always true for loopback; true for a
+   * trusted authority only when `allowPrivilegedFromTrustedHosts` is on). The connection
+   * layer annotates it on the real wire; it is absent when the value was never annotated
+   * (e.g. the in-process handler), and clients then fall back to their own loopback knowledge.
    */
   describe(request: RpcRequest<{}>): Promise<RpcResponse<{
     version: string
@@ -50,6 +55,7 @@ export interface HostApi {
     model?: string
     attachedSessions: number
     canOpenPath: boolean
+    privilegedReachable?: boolean
   }>>
 
   /**

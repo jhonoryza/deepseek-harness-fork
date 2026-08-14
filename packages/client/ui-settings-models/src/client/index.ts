@@ -85,9 +85,11 @@ export function apply(ctx: ClientContext): void {
     api: connection.api,
     t,
   })
+  const privilegedReachable = (): boolean =>
+    connection.hostDescription.getSnapshot()?.privilegedReachable ?? connection.isLoopback
   const welcomeController = new WelcomeNoticeStore(
     connection.api,
-    connection.isLoopback ? 'host' : 'memory',
+    privilegedReachable() ? 'host' : 'memory',
   )
   const welcomeInjected = (): WelcomeNoticeInjected => ({
     controller: welcomeController,
@@ -111,6 +113,12 @@ export function apply(ctx: ClientContext): void {
       ctx.remote.$on('credentials/updated', refreshModels),
       ctx.remote.$on('llm/adapters-updated', refreshModels),
       ctx.on('connection/reset', refreshAll),
+      // The welcome acknowledgement is durable only when the handshake proves
+      // the privileged plane is reachable; promote it once the description
+      // arrives with the server's verdict.
+      connection.hostDescription.subscribe(() => {
+        if (privilegedReachable()) welcomeController.upgradeToHost()
+      }),
     ]
     return () => { for (const dispose of disposers) dispose() }
   }, 'ui-settings-models: pushed invalidations')

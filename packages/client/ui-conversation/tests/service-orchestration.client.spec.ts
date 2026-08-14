@@ -121,12 +121,12 @@ describe('ConversationController', () => {
     // ids must not depend on the secure-context-only API.
     const b = await bench()
     const originalCrypto = globalThis.crypto
-    const originalGetRandomValues = originalCrypto.getRandomValues
+    const originalGetRandomValues = originalCrypto.getRandomValues.bind(originalCrypto)
     const created = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:draft-lan')
     try {
       vi.stubGlobal('crypto', {
-        getRandomValues: (bytes: Uint8Array<ArrayBuffer>) => originalGetRandomValues.call(originalCrypto, bytes),
-      } as unknown as Crypto)
+        getRandomValues: (bytes: Uint8Array<ArrayBuffer>) => originalGetRandomValues(bytes),
+      })
       expect((globalThis.crypto as { randomUUID?: unknown }).randomUUID).toBeUndefined()
       const [attachment] = b.root.createDraftImages([
         new File([new Uint8Array(4)], 'a.png', { type: 'image/png' }),

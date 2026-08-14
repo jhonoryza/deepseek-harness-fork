@@ -283,10 +283,17 @@ describe('ProducedFiles row', () => {
   const capability = (
     canOpenPath: boolean | undefined,
     isLoopback = true,
+    privilegedReachable?: boolean,
   ): Pick<ProducedFilesProps, 'isLoopback' | 'useHostDescription'> => {
     const description = canOpenPath === undefined
       ? undefined
-      : { version: 'test', cwd: '/workspace', attachedSessions: 1, canOpenPath }
+      : {
+        version: 'test',
+        cwd: '/workspace',
+        attachedSessions: 1,
+        canOpenPath,
+        ...(privilegedReachable === undefined ? {} : { privilegedReachable }),
+      }
     return {
       isLoopback,
       useHostDescription: selector => selector(description),
@@ -388,10 +395,33 @@ describe('ProducedFiles row', () => {
     )
     const overflowing = ['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', 'g.md']
     expect(view.queryByRole('button', { name: '在文件夹中显示' })).toBeNull()
-    for (const unavailable of [capability(false), capability(true, false), capability(undefined)]) {
+    for (const unavailable of [
+      capability(false),
+      capability(true, false),
+      capability(undefined),
+      // A remote browser whose handshake denies privilege stays unprivileged.
+      capability(true, false, false),
+    ]) {
       view.rerender(<ProducedFiles matched={overflowing} openFile={openFile} {...unavailable} t={t} />)
       expect(view.queryByRole('button', { name: '在文件夹中显示' })).toBeNull()
     }
+  })
+
+  it('opens the folder for a trusted LAN browser the handshake privileged', () => {
+    const openFile = vi.fn<(path: string) => void>()
+    const overflowing = ['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', 'g.md']
+    const view = render(
+      <ProducedFiles
+        matched={overflowing}
+        openFile={openFile}
+        // Not loopback, but the server verdict says the privileged plane is
+        // reachable from this client and the host can open paths: the folder
+        // action appears.
+        {...capability(true, false, true)}
+        t={t}
+      />,
+    )
+    expect(view.getByRole('button', { name: '在文件夹中显示' })).toBeTruthy()
   })
 
   it('uses singular English copy when exactly one file is hidden', () => {

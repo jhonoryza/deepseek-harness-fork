@@ -138,11 +138,51 @@ const PRIVILEGED_METHODS = new Set([
 ])
 
 /**
+ * Annotate a host.describe success response with the server's privileged
+ * verdict for THIS request: clients cannot see the plugin config that widens
+ * the privileged fence, so the wire carries the answer instead. Non-success
+ * or non-envelope responses pass through untouched (the client keeps its own
+ * loopback fallback then).
+ * @param method - the RPC method from the request path.
+ * @param response - the handler's response.
+ * @param privilegedReachable - whether this request passed the trust fence
+ * with the privileged methods widened to the trusted hosts.
+ * @returns the original response, or a re-serialized copy with
+ * `result.value.privilegedReachable` set.
+ */
+async function annotateHostDescribe(method: string, response: Response, privilegedReachable: boolean): Promise<Response> {
+  if (method !== 'host.describe' || !response.ok) return response
+  let body: unknown
+  try {
+    body = await response.clone().json()
+  } catch {
+    // Body is not JSON: there is no envelope to annotate, pass the response through.
+    return response
+  }
+  const result = (body as { result?: unknown } | null | undefined)?.result
+  const value = (result as { value?: unknown } | null | undefined)?.value
+  if ((result as { ok?: unknown } | null | undefined)?.ok !== true
+    || typeof value !== 'object' || value === null) {
+    return response
+  }
+  ;(value as Record<string, unknown>).privilegedReachable = privilegedReachable
+  const headers = new Headers(response.headers)
+  headers.delete('content-length')
+  return new Response(JSON.stringify(body), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
+}
+
+/**
  * Mounts the API gateway under the browser transport prefix. Every request on
  * the prefix passes the browser-trust fence first (DNS-rebinding and
  * cross-site defense — [api-request-trust](./api-request-trust.ts));
  * privileged methods additionally pass it with an empty trust list, which
- * pins them to loopback.
+ * pins them to loopback. host.describe responses additionally carry the
+ * request's privileged verdict so trusted-LAN clients can open the
+ * configuration plane the fence admitted.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
@@ -162,9 +202,10 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       const method = pathname.startsWith(`${API_PATH}/`)
         ? pathname.slice(API_PATH.length + 1)
         : undefined
+      const privilegedReachable = isTrustedApiRequest(request, allowPrivilegedFromTrustedHosts ? trustedHosts : [])
       if (method !== undefined
         && PRIVILEGED_METHODS.has(method)
-        && !isTrustedApiRequest(request, allowPrivilegedFromTrustedHosts ? trustedHosts : [])) {
+        && !privilegedReachable) {
         return new Response('forbidden', { status: 403 })
       }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
@@ -175,7 +216,8 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       }
       const apiProxy = ctx.get('apiProxy')
       if (apiProxy === undefined) return new Response('not found', { status: 404 })
-      return toFetchHandler(apiProxy).fetch(request)
+      const response = await toFetchHandler(apiProxy).fetch(request)
+      return method === undefined ? response : annotateHostDescribe(method, response, privilegedReachable)
     },
   })
   const route: WebRoute = {

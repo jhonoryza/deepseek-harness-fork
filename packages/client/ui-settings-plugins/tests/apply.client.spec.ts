@@ -32,6 +32,10 @@ async function bench() {
       settings: { describe: vi.fn(() => Promise.resolve({ rpcId: 's', result: { ok: false, error: {} } })) },
       credentials: { describe: describeCredentials },
     },
+    hostDescription: {
+      getSnapshot: () => undefined,
+      subscribe: () => () => {},
+    },
   } as never)
   await ctx.plugin(SettingsScopeBinder).await()
   return { ctx, slots: ctx.get('slots') as SlotRegistry, describeCredentials }

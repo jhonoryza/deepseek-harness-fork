@@ -23,9 +23,31 @@ async function bench(isLoopback = true) {
   // same `$dispatch` handoff the connection sink makes.
   new TestRemote(ctx)
   // The apply path only captures the wire face; no call leaves this fake
-  // until a section actually loads.
-  ctx.provide('connection', { api: {}, isLoopback } as never)
-  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale }
+  // until a section actually loads. The host-description source starts
+  // empty (pre-handshake); `flipDescription` publishes the server verdict.
+  const descriptionListeners = new Set<() => void>()
+  let description: { privilegedReachable?: boolean } | undefined
+  const connection = {
+    api: {},
+    isLoopback,
+    hostDescription: {
+      getSnapshot: () => description,
+      subscribe: (listener: () => void) => {
+        descriptionListeners.add(listener)
+        return () => { descriptionListeners.delete(listener) }
+      },
+    },
+  }
+  ctx.provide('connection', connection as never)
+  return {
+    ctx,
+    slots: ctx.get('slots') as SlotRegistry,
+    locale,
+    flipDescription(next?: { privilegedReachable?: boolean }) {
+      description = next
+      for (const listener of [...descriptionListeners]) listener()
+    },
+  }
 }
 
 function declare(slots: SlotRegistry): () => void {
@@ -157,6 +179,56 @@ describe('ui-settings-models apply', () => {
     expect(injected.controller.store.getSnapshot()).toEqual({
       status: 'ready', acknowledged: false, error: null,
     })
+  })
+
+  it('upgrades the welcome store to Host persistence when the handshake proves privilege', async () => {
+    const describe = vi.fn().mockResolvedValue({
+      rpcId: 'welcome-wire',
+      result: {
+        ok: true,
+        value: {
+          writable: true,
+          hasDocument: false,
+          namespaces: [{
+            ns: 'ui-onboarding',
+            schema: {},
+            value: {},
+            applies: 'live',
+            secrets: [],
+            revision: 0,
+          }],
+        },
+      },
+    })
+    const b = await bench(false)
+    // The upgrade triggers a Host read: the fake wire must answer describe.
+    const wire = b.ctx.get('connection') as unknown as { api: { settings: { describe: typeof describe } } }
+    wire.api = { settings: { describe } }
+    declare(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const entry = b.slots.entries('settings.onboarding')
+      .find(candidate => candidate.options.id === 'welcome-notice')!
+    const injected = (
+      entry.inject as unknown as () => import('../src/client/WelcomeNotice.tsx').WelcomeNoticeInjected
+    )()
+
+    // Pre-handshake: memory mode acknowledges in-process without wire calls.
+    await injected.controller.acknowledge()
+    expect(describe).not.toHaveBeenCalled()
+    expect(injected.controller.store.getSnapshot()).toMatchObject({
+      status: 'ready', acknowledged: true,
+    })
+
+    b.flipDescription({ privilegedReachable: true })
+    await vi.waitFor(() => {
+      expect(injected.controller.store.getSnapshot()).toMatchObject({ status: 'ready', acknowledged: false })
+    })
+    expect(describe).toHaveBeenCalledOnce()
+    // A later non-privileged publication never demotes the host-backed store.
+    b.flipDescription({ privilegedReachable: false })
+    await Promise.resolve()
+    expect(describe).toHaveBeenCalledOnce()
+    expect(injected.controller.store.getSnapshot()).toMatchObject({ status: 'ready', acknowledged: false })
   })
 })
 

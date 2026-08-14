@@ -44,11 +44,32 @@ async function bench(isLoopback = true) {
     rpcId: 'settings-open' as never,
     result: { ok: true as const, value: { opened: true as const } },
   }))
+  // Pre-handshake host description (empty snapshot); the action registration
+  // no longer depends on it, but the connection shape must match the real one.
+  const descriptionListeners = new Set<() => void>()
+  let description: { privilegedReachable?: boolean } | undefined
   ctx.provide('connection', {
     api: { settings: { describe: settingsDescribe, openDocument: settingsOpenDocument } },
     isLoopback,
+    hostDescription: {
+      getSnapshot: () => description,
+      subscribe: (listener: () => void) => {
+        descriptionListeners.add(listener)
+        return () => { descriptionListeners.delete(listener) }
+      },
+    },
   } as never)
-  return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, settingsDescribe, settingsOpenDocument }
+  return {
+    ctx,
+    slots: ctx.get('slots') as SlotRegistry,
+    locale,
+    settingsDescribe,
+    settingsOpenDocument,
+    flipDescription(next?: { privilegedReachable?: boolean }) {
+      description = next
+      for (const listener of [...descriptionListeners]) listener()
+    },
+  }
 }
 
 /** Declare the shell's six child slots the way ui-settings' entry does. */
@@ -163,13 +184,14 @@ describe('ui-settings-general apply', () => {
     await vi.waitFor(() => { expect(b.settingsDescribe).toHaveBeenCalledTimes(2) })
   })
 
-  it('withholds the loopback-only document action off-loopback', async () => {
+  it('registers the document action for any browser and degrades to hidden when the plane is closed', async () => {
+    // The action is now registered for every browser; whether it renders
+    // depends on the Host metadata read (privileged 403 → unavailable → null).
     const b = await bench(false)
     declare(b.slots)
     const fiber = b.ctx.plugin({ inject: [...inject], apply })
     await fiber.await()
-    expect(b.slots.entries('settings.action')).toEqual([])
-    expect(b.settingsDescribe).not.toHaveBeenCalled()
+    expect(b.slots.entries('settings.action')).toHaveLength(1)
     await fiber.dispose()
     for (const [name] of SEATS) expect(b.slots.entries(name)).toEqual([])
   })
